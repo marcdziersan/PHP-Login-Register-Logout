@@ -182,3 +182,185 @@ session_destroy();
 echo "Logout erfolgreich";
 ?>
 ```
+
+# Erweiterung um Passwort vergessen Option
+
+Um die **Passwort vergessen**-Funktion in unser bestehendes Login-System zu integrieren, erweitern wir die Datenbank und fügen zwei neue PHP-Dateien hinzu: **passwortvergessen.php** und **passwortzuruecksetzen.php**. Hier sind die detaillierten Schritte und Quellcodes für die Erweiterung:
+
+### 1. **Datenbankerweiterung**
+Wir müssen die `users`-Tabelle um zwei Spalten erweitern: **`passwortcode`** und **`passwortcode_time`**. Dies ermöglicht es uns, einen temporären Code zu speichern, den der Benutzer verwenden kann, um sein Passwort zurückzusetzen.
+
+```sql
+ALTER TABLE `users` ADD `passwortcode` VARCHAR(255) NULL;
+ALTER TABLE `users` ADD `passwortcode_time` TIMESTAMP NULL;
+```
+
+- **`passwortcode`** speichert den geheimen Code, der zum Zurücksetzen des Passworts benötigt wird.
+- **`passwortcode_time`** speichert den Zeitpunkt, wann der Code generiert wurde. Nur Codes, die innerhalb der letzten 24 Stunden erstellt wurden, sind gültig.
+
+### 2. **Passwort vergessen Seite (passwortvergessen.php)**
+
+Diese Seite ermöglicht es einem Benutzer, seine E-Mail-Adresse einzugeben, um einen Link zum Zurücksetzen des Passworts zu erhalten. Der Link enthält den Benutzer-ID und einen zufällig generierten Code.
+
+```php
+<?php 
+$pdo = new PDO('mysql:host=localhost;dbname=test', 'username', 'passwort');
+ 
+// Zufälligen String für den Passwortcode generieren
+function random_string() {
+    if(function_exists('random_bytes')) {
+        $bytes = random_bytes(16);
+        $str = bin2hex($bytes); 
+    } else if(function_exists('openssl_random_pseudo_bytes')) {
+        $bytes = openssl_random_pseudo_bytes(16);
+        $str = bin2hex($bytes); 
+    } else if(function_exists('mcrypt_create_iv')) {
+        $bytes = mcrypt_create_iv(16, MCRYPT_DEV_URANDOM);
+        $str = bin2hex($bytes); 
+    } else {
+        // Ein zufälliger String
+        $str = md5(uniqid('euer_geheimer_string', true));
+    }   
+    return $str;
+}
+
+$showForm = true;
+
+if(isset($_GET['send'])) {
+    if(empty($_POST['email'])) {
+        $error = "<b>Bitte eine E-Mail-Adresse eintragen</b>";
+    } else {
+        // Überprüfe, ob die E-Mail existiert
+        $statement = $pdo->prepare("SELECT * FROM users WHERE email = :email");
+        $statement->execute(['email' => $_POST['email']]);
+        $user = $statement->fetch();
+ 
+        if($user === false) {
+            $error = "<b>Kein Benutzer gefunden</b>";
+        } else {
+            // Generiere den Code
+            $passwortcode = random_string();
+            $statement = $pdo->prepare("UPDATE users SET passwortcode = :passwortcode, passwortcode_time = NOW() WHERE id = :userid");
+            $statement->execute(['passwortcode' => sha1($passwortcode), 'userid' => $user['id']]);
+ 
+            // Sende den Link mit dem Code per E-Mail
+            $empfaenger = $user['email'];
+            $betreff = "Neues Passwort für deinen Account";
+            $from = "From: DeinName <absender@domain.de>";
+            $url_passwortcode = 'http://localhost/passwortzuruecksetzen.php?userid='.$user['id'].'&code='.$passwortcode;
+            $text = 'Hallo '.$user['vorname'].',
+            
+            Um dein Passwort zurückzusetzen, klicke bitte auf folgenden Link (gilt für 24 Stunden):
+            '.$url_passwortcode.'
+ 
+            Falls du diese Anfrage nicht gestellt hast, ignoriere bitte diese E-Mail.';
+             
+            mail($empfaenger, $betreff, $text, $from);
+ 
+            echo "Ein Link zum Zurücksetzen des Passworts wurde an deine E-Mail-Adresse gesendet.";
+            $showForm = false;
+        }
+    }
+}
+
+if($showForm):
+?>
+
+<h1>Passwort vergessen</h1>
+Bitte gib deine E-Mail-Adresse ein, um ein neues Passwort anzufordern.<br><br>
+
+<?php
+if(isset($error)) {
+    echo $error;
+}
+?>
+
+<form action="?send=1" method="post">
+E-Mail:<br>
+<input type="email" name="email" value="<?php echo isset($_POST['email']) ? htmlentities($_POST['email']) : ''; ?>"><br>
+<input type="submit" value="Neues Passwort anfordern">
+</form>
+
+<?php
+endif; // End if($showForm)
+?>
+```
+
+### 3. **Neues Passwort vergeben Seite (passwortzuruecksetzen.php)**
+
+Wenn der Benutzer den Link in der E-Mail anklickt, wird er zu dieser Seite weitergeleitet, auf der er ein neues Passwort eingeben kann. Der Code wird überprüft, um sicherzustellen, dass er korrekt und noch gültig ist.
+
+```php
+<?php
+$pdo = new PDO('mysql:host=localhost;dbname=test', 'username', 'passwort');
+
+if(!isset($_GET['userid']) || !isset($_GET['code'])) {
+    die("Es wurde kein Code zum Zurücksetzen des Passworts übermittelt.");
+}
+
+$userid = $_GET['userid'];
+$code = $_GET['code'];
+
+// Überprüfe, ob der Benutzer existiert und der Code gültig ist
+$statement = $pdo->prepare("SELECT * FROM users WHERE id = :userid");
+$statement->execute(['userid' => $userid]);
+$user = $statement->fetch();
+
+if($user === null || $user['passwortcode'] === null) {
+    die("Kein Benutzer mit diesem Code gefunden.");
+}
+
+if($user['passwortcode_time'] === null || strtotime($user['passwortcode_time']) < (time() - 24 * 3600)) {
+    die("Dein Code ist leider abgelaufen.");
+}
+
+if(sha1($code) != $user['passwortcode']) {
+    die("Der Code ist ungültig.");
+}
+
+// Der Code ist korrekt, der Benutzer kann ein neues Passwort eingeben
+if(isset($_GET['send'])) {
+    $passwort = $_POST['passwort'];
+    $passwort2 = $_POST['passwort2'];
+    
+    if($passwort != $passwort2) {
+        echo "Die Passwörter stimmen nicht überein.";
+    } else {
+        // Speichere das neue Passwort
+        $passworthash = password_hash($passwort, PASSWORD_DEFAULT);
+        $statement = $pdo->prepare("UPDATE users SET passwort = :passworthash, passwortcode = NULL, passwortcode_time = NULL WHERE id = :userid");
+        $statement->execute(['passworthash' => $passworthash, 'userid' => $userid]);
+        
+        echo "Dein Passwort wurde erfolgreich geändert.";
+    }
+}
+?>
+
+<h1>Neues Passwort vergeben</h1>
+<form action="?send=1&amp;userid=<?php echo htmlentities($userid); ?>&amp;code=<?php echo htmlentities($code); ?>" method="post">
+    Neues Passwort:<br>
+    <input type="password" name="passwort"><br><br>
+ 
+    Passwort erneut eingeben:<br>
+    <input type="password" name="passwort2"><br><br>
+ 
+    <input type="submit" value="Passwort speichern">
+</form>
+```
+
+### 4. **Erklärung der Funktionalität**
+
+- **Passwort vergessen (passwortvergessen.php):**
+  - Der Benutzer gibt seine E-Mail-Adresse ein. Wenn der Benutzer existiert, wird ein zufälliger Code generiert und in der Datenbank gespeichert.
+  - Eine E-Mail mit einem Link wird an den Benutzer gesendet. Dieser Link enthält den Benutzer-ID und den generierten Code.
+  
+- **Neues Passwort vergeben (passwortzuruecksetzen.php):**
+  - Der Benutzer klickt auf den Link in der E-Mail und wird zur Seite weitergeleitet.
+  - Der Code und die Benutzer-ID aus der URL werden überprüft. Wenn alles stimmt und der Code noch gültig ist, kann der Benutzer ein neues Passwort eingeben.
+  - Das neue Passwort wird gehasht und in der Datenbank gespeichert. Der temporäre Code wird gelöscht.
+
+Mit dieser Erweiterung kann ein Benutzer sein Passwort zurücksetzen, falls er es vergessen hat, ohne dass das Passwort direkt per E-Mail versendet wird.
+
+
+
+
