@@ -361,6 +361,178 @@ if(isset($_GET['send'])) {
 
 Mit dieser Erweiterung kann ein Benutzer sein Passwort zurücksetzen, falls er es vergessen hat, ohne dass das Passwort direkt per E-Mail versendet wird.
 
+# Erweiterung um Angemeldet bleiben Funktion
 
+Um die **"Angemeldet bleiben"**-Funktion hinzuzufügen, erweitern wir das Login-System so, dass Benutzer auch nach dem Schließen ihres Browsers weiterhin angemeldet bleiben. Dazu nutzen wir **Cookies**, die eine längere Sitzung ermöglichen. Bei einem erfolgreichen Login werden zusätzlich **Cookies** gesetzt, die die Benutzer-ID und ein Verifizierungstoken speichern. Diese Tokens werden bei jeder Anfrage überprüft, um zu verifizieren, dass der Benutzer authentifiziert ist.
+
+Hier ist, wie wir das bestehende System erweitern können:
+
+### 1. **Datenbankänderung: Zusätzliche Spalte für das Token**
+
+Zuerst fügen wir der **`users`-Tabelle** ein Feld hinzu, um das **Token** für die "Angemeldet bleiben"-Funktion zu speichern.
+
+#### SQL zum Hinzufügen der `remember_token`-Spalte:
+```sql
+ALTER TABLE users ADD COLUMN remember_token VARCHAR(255) NULL;
+```
+
+- **`remember_token`**: Hier wird das Token gespeichert, das der Benutzer in einem Cookie erhält, um die Sitzung zu authentifizieren.
+
+---
+
+### 2. **Login-Formular anpassen: Token setzen**
+
+Nun passen wir das Login-Skript so an, dass es beim erfolgreichen Login zusätzlich ein **Token** generiert und als **Cookie** setzt, wenn der Benutzer die "Angemeldet bleiben"-Option auswählt.
+
+#### Quellcode für `login.php` mit "Angemeldet bleiben"-Funktion:
+
+```php
+<?php
+session_start();
+$pdo = new PDO('mysql:host=localhost;dbname=test', 'username', 'passwort');
+
+// Wenn das Formular abgesendet wird
+if (isset($_POST['submit'])) {
+    $email = $_POST['email'];
+    $passwort = $_POST['passwort'];
+    $remember = isset($_POST['remember']) ? true : false;  // Überprüfe, ob "Angemeldet bleiben" ausgewählt wurde
+
+    // Benutzerdaten aus der Datenbank holen
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE email = :email");
+    $stmt->execute(['email' => $email]);
+    $user = $stmt->fetch();
+
+    if ($user && password_verify($passwort, $user['passwort'])) {
+        // Login erfolgreich, Benutzer-ID in Session speichern
+        $_SESSION['user_id'] = $user['id'];
+
+        // "Angemeldet bleiben"-Funktion: Token generieren
+        if ($remember) {
+            // Ein zufälliges Token generieren
+            $token = bin2hex(random_bytes(16));
+
+            // Token in der Datenbank speichern
+            $stmt = $pdo->prepare("UPDATE users SET remember_token = :token WHERE id = :id");
+            $stmt->execute(['token' => $token, 'id' => $user['id']]);
+
+            // Cookie setzen (gültig für 30 Tage)
+            setcookie('remember_token', $token, time() + (30 * 24 * 60 * 60), '/', null, null, true); // HttpOnly und Secure setzen, wenn auf HTTPS
+        }
+
+        echo "Login erfolgreich!";
+        header("Location: dashboard.php");
+        exit();
+    } else {
+        echo "Ungültige E-Mail oder Passwort!";
+    }
+}
+?>
+
+<form method="post" action="">
+    E-Mail: <input type="email" name="email" required><br>
+    Passwort: <input type="password" name="passwort" required><br>
+    <input type="checkbox" name="remember"> Angemeldet bleiben<br>
+    <input type="submit" name="submit" value="Login">
+</form>
+```
+
+**Erklärung**:
+- Wenn der Benutzer die "Angemeldet bleiben"-Option auswählt, wird ein **Token** generiert, in der Datenbank gespeichert und als **Cookie** auf dem Client gesetzt.
+- Das Cookie wird 30 Tage lang gespeichert, sodass der Benutzer auch nach dem Schließen des Browsers weiterhin eingeloggt bleibt.
+
+---
+
+### 3. **Token bei jedem Aufruf überprüfen: Automatisches Anmelden**
+
+Nun müssen wir sicherstellen, dass bei jeder Anfrage überprüft wird, ob ein gültiges **Remember-Token** vorhanden ist. Wenn ja, authentifizieren wir den Benutzer automatisch.
+
+#### Quellcode für `check_login.php` (Überprüfung des Tokens bei jeder Anfrage):
+
+```php
+<?php
+session_start();
+$pdo = new PDO('mysql:host=localhost;dbname=test', 'username', 'passwort');
+
+// Wenn der Benutzer bereits eingeloggt ist
+if (isset($_SESSION['user_id'])) {
+    // Benutzer ist bereits angemeldet, keine weiteren Aktionen erforderlich
+    return;
+}
+
+// Wenn kein Benutzer in der Session ist, überprüfen wir das Token im Cookie
+if (isset($_COOKIE['remember_token'])) {
+    $token = $_COOKIE['remember_token'];
+
+    // Benutzer mit diesem Token finden
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE remember_token = :token");
+    $stmt->execute(['token' => $token]);
+    $user = $stmt->fetch();
+
+    if ($user) {
+        // Benutzer ist authentifiziert, setzen wir die Session
+        $_SESSION['user_id'] = $user['id'];
+
+        // Optional: Token erneuern (für längere Gültigkeit)
+        $new_token = bin2hex(random_bytes(16));
+        $stmt = $pdo->prepare("UPDATE users SET remember_token = :token WHERE id = :id");
+        $stmt->execute(['token' => $new_token, 'id' => $user['id']]);
+
+        // Neues Token im Cookie setzen
+        setcookie('remember_token', $new_token, time() + (30 * 24 * 60 * 60), '/', null, null, true); // HttpOnly und Secure setzen
+    }
+}
+?>
+```
+
+**Erklärung**:
+- Wenn der Benutzer bereits in der Session ist, passiert nichts. Wenn jedoch kein Benutzer in der Session eingeloggt ist, prüfen wir, ob ein **Token** im **Cookie** existiert.
+- Wenn das Token gültig ist, wird der Benutzer automatisch eingeloggt, und die Session wird entsprechend gesetzt.
+- Der **Token** wird auch erneuert, damit der Benutzer für weitere 30 Tage angemeldet bleibt.
+
+---
+
+### 4. **Logout-Logik mit "Angemeldet bleiben"**
+
+Wenn der Benutzer sich ausloggt, müssen wir das Token im Cookie und der Datenbank entfernen, um sicherzustellen, dass der Benutzer nicht mehr automatisch eingeloggt wird.
+
+#### Quellcode für `logout.php` (inklusive "Angemeldet bleiben"):
+
+```php
+<?php
+session_start();
+$pdo = new PDO('mysql:host=localhost;dbname=test', 'username', 'passwort');
+
+// Token in der Datenbank auf NULL setzen
+if (isset($_SESSION['user_id'])) {
+    $stmt = $pdo->prepare("UPDATE users SET remember_token = NULL WHERE id = :id");
+    $stmt->execute(['id' => $_SESSION['user_id']]);
+
+    // Session und Cookie löschen
+    setcookie('remember_token', '', time() - 3600, '/', null, null, true);  // Cookie löschen
+    session_unset();
+    session_destroy();
+
+    echo "Du wurdest erfolgreich ausgeloggt!";
+    header("Location: login.php");
+    exit();
+}
+?>
+```
+
+**Erklärung**:
+- Wenn der Benutzer sich ausloggt, wird das **Token** in der Datenbank auf `NULL` gesetzt und das **Cookie** gelöscht.
+- Der Benutzer wird dann auf die Login-Seite weitergeleitet.
+
+---
+
+### Zusammenfassung
+
+Mit dieser Erweiterung haben wir die **"Angemeldet bleiben"-Funktion** hinzugefügt. Wenn der Benutzer die entsprechende Option auswählt, wird ein **Token** generiert und im **Cookie** des Benutzers gespeichert. Bei jeder Anfrage wird überprüft, ob ein gültiges Token vorhanden ist, und der Benutzer wird automatisch angemeldet.
+
+- **Token-Generierung**: Bei jedem Login wird ein einzigartiges Token erstellt und in der Datenbank sowie als Cookie gespeichert.
+- **Token-Überprüfung**: Bei jedem Seitenaufruf wird das Token überprüft, um den Benutzer automatisch anzumelden.
+- **Logout**: Beim Logout wird das Token entfernt, und der Benutzer wird von der Sitzung abgemeldet.
+
+Diese Funktion sorgt für ein angenehmes Benutzererlebnis, da der Benutzer nicht jedes Mal seine Anmeldedaten eingeben muss, wenn er die Seite besucht.
 
 
